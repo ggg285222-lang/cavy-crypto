@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Crypto Signal Bot - GitHub Actions 定时扫描版
-每 15 分钟由 GitHub 云服务器自动唤醒一次，扫描 11 大核心资产的 15m 与 4H 信号，
-一旦发现底背离CHoCH或EMA回踩，立即推送到 Lark (飞书)，扫描完毕后自动关机，100% 零费用！
+Crypto Signal Bot - GitHub Actions 定时扫描版 (Telegram 官方直连)
+每 15 分钟由 GitHub 云端自动唤醒一次，扫描 11 大核心资产的 15m 与 4H 信号，
+一旦发现底背离CHoCH或EMA回踩，立即推送到你的 Telegram，扫描完毕后自动关机，100% 零费用！
 """
 
 import os
@@ -21,8 +21,11 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
-# 从 GitHub Secrets 环境变量中安全读取 Lark Webhook
-LARK_WEBHOOK_URL = os.environ.get("LARK_WEBHOOK_URL", "").strip()
+# ==========================================
+# Telegram 专属配置 (已为你自动配置完毕！)
+# ==========================================
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8708038882:AAFrnq6jzFS1OJDg35t32zO6MKLrIIrV7Hc").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "7536260641").strip()
 
 CONFIG = {
     "SYMBOLS": ["BTC", "ETH", "SOL", "XRP", "DOGE", "SUI", "ADA", "LINK", "VET", "ASTER", "LTC"],
@@ -174,25 +177,23 @@ def check_strategy_2_ema_pullback(klines: List[Dict], ema20: List[float], ema50:
     return None
 
 
-def send_to_lark(text_msg: str):
-    logging.info(f"\n[推送到 Lark]:\n{text_msg}\n")
-    if not LARK_WEBHOOK_URL:
-        logging.warning("⚠️ LARK_WEBHOOK_URL 未在环境变量中配置，仅打印日志。")
-        return
-
-    try:
-        payload = json.dumps({"msg_type": "text", "content": {"text": text_msg}}).encode('utf-8')
-        req = urllib.request.Request(LARK_WEBHOOK_URL, data=payload, headers={'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=10) as res:
-            logging.info("Lark 手机推送发送成功！")
-    except Exception as e:
-        logging.error(f"Lark 推送失败: {e}")
+def send_alert(text_msg: str):
+    logging.info(f"\n[发送通知]:\n{text_msg}\n")
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            payload = json.dumps({"chat_id": TELEGRAM_CHAT_ID, "text": text_msg}).encode('utf-8')
+            req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req, timeout=10) as res:
+                logging.info("Telegram 手机推送成功！")
+        except Exception as e:
+            logging.error(f"Telegram 发送失败: {e}")
 
 
 def main():
     if "--test-alert" in sys.argv:
-        test_msg = "🟢 【GitHub Actions 联调成功】\n你的加密货币 24/7 云端雷达已成功激活并接入 Lark！"
-        send_to_lark(test_msg)
+        test_msg = "🟢 【GitHub Actions 联调成功】\n你的加密货币 24/7 云端雷达已成功激活并接入 Telegram！"
+        send_alert(test_msg)
         return
 
     logging.info("GitHub Actions 定时扫描任务开始...")
@@ -237,7 +238,7 @@ def main():
                     f"━━━━━━━━━━━━━━━━━━\n"
                     f"💡 纪律：单笔亏损严格锁死在总账户资金 1%~2%！"
                 )
-                send_to_lark(msg)
+                send_alert(msg)
 
             sig2 = check_strategy_2_ema_pullback(klines, ema20, ema50, tf)
             if sig2:
@@ -259,7 +260,7 @@ def main():
                     f"━━━━━━━━━━━━━━━━━━\n"
                     f"💡 纪律：单笔亏损严格锁死在总账户资金 1%~2%！"
                 )
-                send_to_lark(msg)
+                send_alert(msg)
 
     logging.info(f"本次扫描完成，共捕获 {signals_found} 个交易信号。")
 
