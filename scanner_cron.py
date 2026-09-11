@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-Crypto Signal Bot - GitHub Actions 定时扫描版 (Telegram 官方直连)
-每 15 分钟由 GitHub 云端自动唤醒一次，扫描 11 大核心资产的 15m 与 4H 信号，
-一旦发现底背离CHoCH或EMA回踩，立即推送到你的 Telegram，扫描完毕后自动关机，100% 零费用！
+Crypto Signal Bot - GitHub Actions 定时扫描版 (行情技术形态 + 宏观重大数据雷达)
+包含两大核心模块：
+1. 【技术信号】：11 大主流币 15m/4H 双周期 RSI底背离CHoCH 与 EMA顺势回踩
+2. 【宏观数据】：自动监控美国 非农(NFP)、CPI、PPI、初请失业金、美联储FOMC利率决议，
+   并在重磅数据公布前 1~2 小时自动向 Telegram 发出“黑天鹅防插针警报与数据前瞻”！
 """
 
 import os
@@ -10,6 +12,7 @@ import sys
 import time
 import json
 import logging
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional
 import urllib.request
 import urllib.parse
@@ -22,10 +25,11 @@ logging.basicConfig(
 )
 
 # ==========================================
-# Telegram 专属配置 (已为你自动配置完毕！)
+# Telegram 专属配置 (已全部为你内置好)
 # ==========================================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8708038882:AAFrnq6jzFS1OJDg35t32zO6MKLrIIrV7Hc").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "7536260641").strip()
+LARK_WEBHOOK_URL = os.environ.get("LARK_WEBHOOK_URL", "").strip()
 
 CONFIG = {
     "SYMBOLS": ["BTC", "ETH", "SOL", "XRP", "DOGE", "SUI", "ADA", "LINK", "VET", "ASTER", "LTC"],
@@ -33,6 +37,85 @@ CONFIG = {
 }
 
 
+# ==========================================
+# 模块一：宏观经济日历雷达 (CPI / 非农 / PPI / 失业金 / FOMC)
+# ==========================================
+def check_macro_events():
+    """自动拉取本周高影响力宏观数据，并在即将公布前触发 Telegram 预警"""
+    url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as response:
+            events = json.loads(response.read().decode())
+    except Exception as e:
+        logging.warning(f"获取宏观经济日历失败: {e}")
+        return
+
+    now = datetime.now(timezone.utc)
+    target_keywords = ['cpi', 'ppi', 'payrolls', 'claims', 'fomc', 'rate', 'powell', 'retail sales']
+
+    cache_file = "/tmp/macro_alerted_cache.json"
+    alerted = []
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, "r") as f:
+                alerted = json.load(f)
+        except Exception:
+            alerted = []
+
+    for e in events:
+        if e.get('country') != 'USD' or e.get('impact') not in ['High', 'Medium']:
+            continue
+
+        title = e.get('title', '')
+        if not any(k in title.lower() for k in target_keywords):
+            continue
+
+        dt_str = e.get('date')
+        try:
+            event_dt = datetime.fromisoformat(dt_str)
+            bj_dt = event_dt.astimezone(timezone(timedelta(hours=8)))
+            hours_diff = (event_dt - now).total_seconds() / 3600
+
+            cache_id = f"{title}_{dt_str}"
+            if 0 < hours_diff <= 2.0 and cache_id not in alerted:
+                alerted.append(cache_id)
+                
+                tips = "数据公布前后 15 分钟切勿开新仓，做市商撤单极易产生双向巨额插针！"
+                if "cpi" in title.lower():
+                    tips = "【通胀核心指标】：若公布值低于预期，降息预期升温，利多币圈！反之若高于预期，警惕短线急跌。"
+                elif "payrolls" in title.lower():
+                    tips = "【非农超级重磅】：若就业强劲则美元走强利空币圈；若就业放缓则强化降息利好风险资产。"
+                elif "claims" in title.lower():
+                    tips = "【初请失业金】：每周四固定前瞻指标，反映美国劳动力市场实时降温程度。"
+                elif "fomc" in title.lower() or "rate" in title.lower():
+                    tips = "【美联储利率决议】：年度顶级海啸事件，建议清仓观望鲍威尔发言。"
+
+                msg = (
+                    f"⏰ 【宏观警报：重磅数据倒计时】\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"事件名称: {title} (美国USD)\n"
+                    f"公布时间: 北京时间 {bj_dt.strftime('%m-%d %H:%M')} (约 {int(hours_diff * 60)} 分钟后)\n"
+                    f"预测数值: {e.get('forecast', '暂无预测')}\n"
+                    f"前期数值: {e.get('previous', '暂无前值')}\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"💡 20年交易员风控提示：\n{tips}"
+                )
+                send_alert(msg)
+
+        except Exception as ex:
+            logging.error(f"解析宏观时间失败: {ex}")
+
+    try:
+        with open(cache_file, "w") as f:
+            json.dump(alerted[-50:], f)
+    except Exception:
+        pass
+
+
+# ==========================================
+# 模块二：技术行情数据拉取与指标计算
+# ==========================================
 def fetch_klines(coin: str, interval: str = "15m", limit: int = 50) -> Optional[List[Dict]]:
     if coin == "VET":
         url = f"https://api.binance.us/api/v3/klines?symbol=VETUSDT&interval={interval}&limit={limit}"
@@ -189,6 +272,15 @@ def send_alert(text_msg: str):
         except Exception as e:
             logging.error(f"Telegram 发送失败: {e}")
 
+    if LARK_WEBHOOK_URL:
+        try:
+            payload = json.dumps({"msg_type": "text", "content": {"text": text_msg}}).encode('utf-8')
+            req = urllib.request.Request(LARK_WEBHOOK_URL, data=payload, headers={'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=10) as res:
+                logging.info("Lark 推送成功！")
+        except Exception as e:
+            logging.error(f"Lark 发送失败: {e}")
+
 
 def main():
     if "--test-alert" in sys.argv:
@@ -196,7 +288,12 @@ def main():
         send_alert(test_msg)
         return
 
-    logging.info("GitHub Actions 定时扫描任务开始...")
+    # 1. 优先执行宏观日历巡检 (重磅数据前 1~2 小时自动预警)
+    logging.info("正在执行宏观经济数据日历扫描...")
+    check_macro_events()
+
+    # 2. 执行 11 大币种行情 K 线扫描
+    logging.info("正在执行加密货币技术指标扫描...")
     signals_found = 0
 
     for coin in CONFIG["SYMBOLS"]:
@@ -262,7 +359,7 @@ def main():
                 )
                 send_alert(msg)
 
-    logging.info(f"本次扫描完成，共捕获 {signals_found} 个交易信号。")
+    logging.info(f"本次扫描完成，共捕获 {signals_found} 个技术交易信号。")
 
 
 if __name__ == "__main__":
